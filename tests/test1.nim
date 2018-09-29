@@ -31,23 +31,21 @@ suite "treebuilder":
     b.add(tkPipe)
     check b.complete() == false
   
-  test "empty to \L":
+  test "empty to newline":
     b.add(tkNewline)
     check b.complete() == false
   
   test "term term":
     b.add(tkString, "foo")
     b.add(tkString, "bar")
-    check b.root.kind == OGroup
-    check b.root.group_kind == OConcat
+    check b.root.kind == OConcat
     check $b.root == "\"foo\" \"bar\""
     check b.complete()
   
   test "term rule":
     b.add(tkString, "foo")
     b.add(tkIdentifier, "hey")
-    check b.root.kind == OGroup
-    check b.root.group_kind == OConcat
+    check b.root.kind == OConcat
     check $b.root == "\"foo\" hey"
     check b.complete()
 
@@ -55,8 +53,7 @@ suite "treebuilder":
     b.add(tkString, "foo")
     b.add(tkString, "bar")
     b.add(tkPlus)
-    check b.root.kind == OGroup
-    check b.root.group_kind == OConcat
+    check b.root.kind == OConcat
     check $b.root == "\"foo\" \"bar\"+"
     check b.root.children.len == 2
     check b.root.children[1].kind == ORepetition
@@ -68,8 +65,8 @@ suite "treebuilder":
     b.add(tkStar)
     check b.root.kind == ORepetition
     check b.root.repetition_kind == OZeroOrMore
-    check b.root.child.kind == ORule
-    check b.root.child.rule == "rule"
+    check b.root.children[0].kind == ORule
+    check b.root.children[0].rule == "rule"
     check $b.root == "rule*"
   
   test "term ?":
@@ -77,8 +74,8 @@ suite "treebuilder":
     b.add(tkQuestion)
     check b.root.kind == ORepetition
     check b.root.repetition_kind == OZeroOrOne
-    check b.root.child.kind == OTerminal
-    check b.root.child.val == "foo"
+    check b.root.children[0].kind == OTerminal
+    check b.root.children[0].val == "foo"
     check $b.root == "\"foo\"?"
   
   test "(term term)+":
@@ -95,9 +92,20 @@ suite "treebuilder":
     check b.root.kind == ORepetition
     check b.root.repetition_kind == OOneOrMore
     check $b.root == "(\"a\" \"b\")+"
-    check b.root.child.kind == OGroup
-    check b.root.child.group_kind == OConcat
+    check b.root.children[0].kind == OConcat
   
+  test "rule rule | rule":
+    b.add(tkIdentifier, "a")
+    b.add(tkIdentifier, "b")
+    b.add(tkPipe)
+    b.add(tkIdentifier, "c")
+    check b.complete
+    check b.root.kind == OAlternation
+    check b.root.children[0].kind == OConcat
+    check b.root.children[0].children.len == 2
+    check b.root.children[1].kind == ORule
+    check $b.root == "a b | c"
+
   test "term (rule | term)":
     b.add(tkString, "a")
     b.add(tkParenOpen)
@@ -111,12 +119,10 @@ suite "treebuilder":
     b.add(tkParenClose)
     check b.complete == true
 
-    check b.root.kind == OGroup
-    check b.root.group_kind == OConcat
+    check b.root.kind == OConcat
     check b.root.children.len == 2
     check b.root.children[0].val == "a"
-    check b.root.children[1].kind == OGroup
-    check b.root.children[1].group_kind == OAlternation
+    check b.root.children[1].kind == OAlternation
     check b.root.children[1].children.len == 2
     check b.root.children[1].children[0].rule == "b"
     check b.root.children[1].children[1].val == "c"
@@ -129,8 +135,7 @@ suite "treebuilder":
     check b.complete() == false
     b.add(tkString, "b")
     check b.complete()
-    check b.root.kind == OGroup
-    check b.root.group_kind == OAlternation
+    check b.root.kind == OAlternation
     check $b.root == "\"a\" | \"b\""
     check b.root.children.len == 2
     check b.root.children[0].kind == OTerminal
@@ -144,6 +149,16 @@ suite "treebuilder":
     check b.root.kind == ORule
     check b.root.rule == "hello"
     check $b.root == "hello"
+  
+  test "rule -- foo | rule -- bar":
+    b.add(tkIdentifier, "a")
+    b.add(tkDoubleHyphen)
+    b.add(tkIdentifier, "foo")
+    b.add(tkPipe)
+    b.add(tkIdentifier, "b")
+    b.add(tkDoubleHyphen)
+    b.add(tkIdentifier, "bar")
+
 
 
 # test "match":

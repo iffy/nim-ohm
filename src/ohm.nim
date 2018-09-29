@@ -337,11 +337,10 @@ type
   OExprKind* = enum
     OTerminal,
     ORule,
-    OGroup,
     OEmpty,
     ORepetition,
-  
-  OGroupKind* = enum
+    ONamedExpr,
+    OGenericGroup,
     OAlternation,
     OConcat,
   
@@ -353,18 +352,17 @@ type
   OExprNode* = ref OExprNodeObj
   OExprNodeObj* {.acyclic.} = object
     parent*: OExprNode
+    children*: seq[OExprNode]
     case kind*: OExprKind
     of OTerminal:
       val*: string
     of ORule:
       rule*: string
-    of OGroup:
-      children*: seq[OExprNode]
-      group_kind*: OGroupKind
     of ORepetition:
-      child*: OExprNode
       repetition_kind*: ORepetitionKind
-    of OEmpty:
+    of ONamedExpr:
+      name*: string
+    of OEmpty, OGenericGroup, OAlternation, OConcat:
       discard
   
   ParserState = enum
@@ -386,16 +384,19 @@ proc newEmpty(): OExprNode =
   new(result)
   result.kind = OEmpty
 
+proc newGenericGroup(children: seq[OExprNode] = @[]): OExprNode =
+  new(result)
+  result.kind = OGenericGroup
+  result.children = children
+
 proc newConcat(children: seq[OExprNode] = @[]): OExprNode =
   new(result)
-  result.kind = OGroup
-  result.group_kind = OConcat
+  result.kind = OConcat
   result.children = children
 
 proc newAlternation(children: seq[OExprNode] = @[]): OExprNode =
   new(result)
-  result.kind = OGroup
-  result.group_kind = OAlternation
+  result.kind = OAlternation
   result.children = children
 
 proc newRuleApplication(name: string): OExprNode =
@@ -412,7 +413,7 @@ proc newRepetition(kind: ORepetitionKind, child: OExprNode): OExprNode =
   new(result)
   result.kind = ORepetition
   result.repetition_kind = kind
-  result.child = child
+  result.children = @[child]
 
 proc newExprBuilder*(): OExprBuilder =
   result = OExprBuilder()
@@ -429,16 +430,23 @@ proc `$`*(node: OExprNode): string =
   of OTerminal:
     # XXX do this right
     result = &"\"{node.val}\""
-  of OGroup:
+  of OGenericGroup:
+    result.add("(")
     var joiner = " "
-    case node.group_kind
-    of OConcat:
-      joiner = " "
-    of OAlternation:
-      joiner = " | "
     for child in node.children:
       if result.len > 0:
-        result.add(joiner)
+        result.add(" ")
+      result.add($child)
+    result.add(")")
+  of OConcat:
+    for child in node.children:
+      if result.len > 0:
+        result.add(" ")
+      result.add($child)
+  of OAlternation:
+    for child in node.children:
+      if result.len > 0:
+        result.add(" | ")
       result.add($child)
   of ORepetition:
     var suffix = ""
@@ -449,40 +457,30 @@ proc `$`*(node: OExprNode): string =
       suffix = "*"
     of OZeroOrOne:
       suffix = "?"
-    if node.child.kind == OGroup:
-      result = &"({node.child}){suffix}"
+    if node.children[0].children.len > 0:
+      result = &"({node.children[0]}){suffix}"
     else:
-      result = &"{node.child}{suffix}"
+      result = &"{node.children[0]}{suffix}"
   of OEmpty:
     result = "<empty>"
   of ORule:
     result = node.rule
+  of ONamedExpr:
+    result = &"{node.children[0]} -- {node.name}"
 
 proc `$`*(rule: ORuleDef): string =
   result = &"{rule.name} = {$rule.expression}"
 
-proc add*(group: var OExprNode, child: var OExprNode) =
-  case group.kind
-  of OGroup:
-    group.children.add(child)
-    child.parent = group
-  of ORepetition:
-    group.child = child
-    child.parent = group
-  else:
-    raise newException(CatchableError, &"Can't add to {group.kind}")
-
 proc remove*(group: var OExprNode, child: var OExprNode) =
-  case group.kind
-  of OGroup:
-    let idx = group.children.find(child)
-    group.children.delete(idx)
-    child.parent = nil
-  of ORepetition:
-    group.child = nil
-    child.parent = nil
-  else:
-    raise newException(CatchableError, &"Can't remove from {group.kind}")
+  let idx = group.children.find(child)
+  group.children.delete(idx)
+  child.parent = nil
+
+proc add*(group: var OExprNode, child: var OExprNode) =
+  if child.parent != nil:
+    child.parent.remove(child)
+  group.children.add(child)
+  child.parent = group
 
 proc replace(oldchild: var OExprNode, newchild: var OExprNode) =
   if oldchild.parent == nil:
@@ -513,11 +511,10 @@ proc root*(ex: OExprBuilder): OExprNode;
 
 proc add*(builder: var OExprBuilder, kind: TokKind, val: string = "") =
   var a = builder.cursor
-  # echo ""
-  # echo "ADDING ", "+ ", kind, " ", val
-  # echo ""
-  # echo printTree(builder.root)
-  # echo "a = ", a
+  echo ""
+  echo "ADDING ", "+ ", kind, " ", val
+  echo printTree(builder.root)
+  echo "cursor -> ", a
   case a.kind
   of OEmpty:
     # empty + ...
@@ -541,7 +538,7 @@ proc add*(builder: var OExprBuilder, kind: TokKind, val: string = "") =
       discard
     else:
       raise newException(CatchableError, &"TODO 0 {kind}")
-  of OTerminal, ORule, OGroup:
+  of OTerminal, ORule, OAlternation, OConcat, OGenericGroup:
     # (terminal | rule) + ...
     case kind
     of tkString, tkIdentifier:
@@ -554,12 +551,8 @@ proc add*(builder: var OExprBuilder, kind: TokKind, val: string = "") =
       else:
         # has a parent already
         case a.parent.kind
-        of OGroup:
-          case a.parent.group_kind
-          of OConcat:
-            a.parent.add(builder.cursor)
-          else:
-            raise newException(CatchableError, &"TODO 1 {a.parent.group_kind}")
+        of OConcat:
+          a.parent.add(builder.cursor)
         else:
           raise newException(CatchableError, &"TODO 2 {a.parent.kind}")
     of tkPlus, tkStar, tkQuestion:
@@ -583,6 +576,7 @@ proc add*(builder: var OExprBuilder, kind: TokKind, val: string = "") =
       builder.cursor = newEmpty()
       inc(builder.incomplete) # for the new empty
       var group = newConcat()
+      group.add(a)
       group.add(builder.cursor)
       inc(builder.incomplete) # for the (
     of tkPipe:
@@ -595,14 +589,20 @@ proc add*(builder: var OExprBuilder, kind: TokKind, val: string = "") =
         group.add(a)
         group.add(builder.cursor)
       else:
-        discard
+        case a.parent.kind
+        of OConcat:
+          var group = newAlternation()
+          group.add(a.parent)
+          group.add(builder.cursor)
+        else:
+          raise newException(CatchableError, &"TODO B {a.parent.kind}")
     else:
       raise newException(CatchableError, &"TODO 5 {kind}")
   else:
     raise newException(CatchableError, &"TODO 6 {a.kind}")
   # echo "builder.cursor: ", builder.cursor
-  # echo "tree"
-  # echo printTree(builder.root)
+  echo "newtree"
+  echo printTree(builder.root)
 
 proc root*(ex: OExprBuilder): OExprNode =
   if ex.cursor == nil:
@@ -614,23 +614,16 @@ proc root*(ex: OExprBuilder): OExprNode =
 
 proc nodes*(node: OExprNode, level: int = 0): seq[(int, OExprNode)] =
   result.add((level, node))
-  case node.kind
-  of OGroup:
-    for child in node.children:
-      for subchild in child.nodes(level + 1):
-        result.add(subchild)
-  of ORepetition:
-    for subchild in node.child.nodes(level + 1):
+  for child in node.children:
+    for subchild in child.nodes(level + 1):
       result.add(subchild)
-  else:
-    discard
 
 proc complete*(builder: OExprBuilder): bool =
   result = builder.incomplete == 0
 
 proc printTree*(node: OExprNode): string =
   for x in node.nodes():
-    result.add("...".repeat(x[0]))
+    result.add("..".repeat(x[0]))
     result.add($x[1].kind)
     result.add(" ")
     result.add($x[1])
