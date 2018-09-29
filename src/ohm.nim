@@ -318,15 +318,15 @@ iterator tokens*(my: var OLexer): (TokKind, string) =
 type
   OGrammar* = object
     name*: string
-    rules*: seq[ORule]
+    rules*: seq[ORuleDef]
   
-  ORule* = object
+  ORuleDef* = object
     name*: string
     description*: string
     expression*: OExprBuilder
   
   OExprBuilder* = object
-    opengroup*: OExprNode
+    stack*: OExprNode
     cursor*: OExprNode
     incomplete*: int
 
@@ -336,7 +336,7 @@ type
 
   OExprKind* = enum
     OTerminal,
-    ORuleApplication,
+    ORule,
     OGroup,
     OEmpty,
     ORepetition,
@@ -356,7 +356,7 @@ type
     case kind*: OExprKind
     of OTerminal:
       val*: string
-    of ORuleApplication:
+    of ORule:
       rule*: string
     of OGroup:
       children*: seq[OExprNode]
@@ -400,7 +400,7 @@ proc newAlternation(children: seq[OExprNode] = @[]): OExprNode =
 
 proc newRuleApplication(name: string): OExprNode =
   new(result)
-  result.kind = ORuleApplication
+  result.kind = ORule
   result.rule = name
 
 proc newTerminal*(val: string): OExprNode =
@@ -419,8 +419,8 @@ proc newExprBuilder*(): OExprBuilder =
   result.cursor = newEmpty()
   result.incomplete = 1
 
-proc newRule(name: string): ORule =
-  result = ORule()
+proc newRule(name: string): ORuleDef =
+  result = ORuleDef()
   result.name = name
   result.expression = newExprBuilder()
 
@@ -455,10 +455,10 @@ proc `$`*(node: OExprNode): string =
       result = &"{node.child}{suffix}"
   of OEmpty:
     result = "<empty>"
-  of ORuleApplication:
+  of ORule:
     result = node.rule
 
-proc `$`*(rule: ORule): string =
+proc `$`*(rule: ORuleDef): string =
   result = &"{rule.name} = {$rule.expression}"
 
 proc add*(group: var OExprNode, child: var OExprNode) =
@@ -503,7 +503,7 @@ proc newNode(kind: TokKind, val: string): OExprNode =
     result.kind = OTerminal
     result.val = val
   of tkIdentifier:
-    result.kind = ORuleApplication
+    result.kind = ORule
     result.rule = val
   else:
     raise newException(CatchableError, &"Unknown node type: {kind}")
@@ -511,7 +511,7 @@ proc newNode(kind: TokKind, val: string): OExprNode =
 proc printTree*(node: OExprNode): string;
 proc root*(ex: OExprBuilder): OExprNode;
 
-proc add*(builder: var OExprBuilder, kind: TokKind, val: string) =
+proc add*(builder: var OExprBuilder, kind: TokKind, val: string = "") =
   var a = builder.cursor
   # echo ""
   # echo "ADDING ", "+ ", kind, " ", val
@@ -540,8 +540,8 @@ proc add*(builder: var OExprBuilder, kind: TokKind, val: string) =
       # ... pipe | \L
       discard
     else:
-      raise newException(CatchableError, &"Not implemented yet {kind}")
-  of OTerminal, ORuleApplication, OGroup:
+      raise newException(CatchableError, &"TODO 0 {kind}")
+  of OTerminal, ORule, OGroup:
     # (terminal | rule) + ...
     case kind
     of tkString, tkIdentifier:
@@ -559,17 +559,43 @@ proc add*(builder: var OExprBuilder, kind: TokKind, val: string) =
           of OConcat:
             a.parent.add(builder.cursor)
           else:
-            raise newException(CatchableError, "TODO 1")
+            raise newException(CatchableError, &"TODO 1 {a.parent.group_kind}")
         else:
-          raise newException(CatchableError, "TODO 2")
-    of tkPlus:
-      # ... +
-      builder.cursor = newRepetition(OOneOrMore, a)
+          raise newException(CatchableError, &"TODO 2 {a.parent.kind}")
+    of tkPlus, tkStar, tkQuestion:
+      # ... + | * | ?
+      case kind
+      of tkPlus:
+        builder.cursor = newRepetition(OOneOrMore, a)
+      of tkStar:
+        builder.cursor = newRepetition(OZeroOrMore, a)
+      of tkQuestion:
+        builder.cursor = newRepetition(OZeroOrOne, a)
+      else:
+        discard
       a.replace(builder.cursor)
     of tkParenClose:
       # ... )
       builder.cursor = builder.cursor.parent 
       dec(builder.incomplete) # for )
+    of tkParenOpen:
+      # ... (
+      builder.cursor = newEmpty()
+      inc(builder.incomplete) # for the new empty
+      var group = newConcat()
+      group.add(builder.cursor)
+      inc(builder.incomplete) # for the (
+    of tkPipe:
+      # ... |
+      builder.cursor = newEmpty()
+      inc(builder.incomplete) # for the new empty
+
+      if a.parent == nil:
+        var group = newAlternation()
+        group.add(a)
+        group.add(builder.cursor)
+      else:
+        discard
     else:
       raise newException(CatchableError, &"TODO 5 {kind}")
   else:
@@ -643,7 +669,7 @@ proc `$`*(ex: OExprBuilder): string =
 proc parseGrammar*(s:string): OGrammar =
   var lexer = initLexer(s)
   result = OGrammar()
-  var rule: ORule
+  var rule: ORuleDef
   var state: seq[ParserState] = @[stateBetweenGrammars]
   var i = state.len-1
   
