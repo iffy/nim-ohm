@@ -8,36 +8,36 @@ suite "treebuilder":
   setup:
     b = newExprBuilder()
   
-  test "empty to OTerminal":
+  test "OTerm":
     b.add(tkString, "foo")
-    echo "b.cursor: ", b.cursor
-    check b.root.kind == OTerminal
-    check b.root.val == "foo"
+    check b.root.kind == OTerm
+    check b.root.term == "foo"
     check $b.root == "\"foo\""
     check b.complete()
   
-  test "empty to ORule":
+  test "OIdentifier":
     b.add(tkIdentifier, "hello")
-    check b.root.kind == ORule
-    check b.root.rule == "hello"
+    check b.root.kind == OIdentifier
+    check b.root.identifier == "hello"
     check $b.root == "hello"
     check b.complete()
   
-  test "empty to (":
+  test "(":
     b.add(tkParenOpen)
     check b.complete() == false
   
-  test "empty to |":
+  test "|":
     b.add(tkPipe)
     check b.complete() == false
   
-  test "empty to newline":
-    b.add(tkNewline)
-    check b.complete() == false
+  # test "newline":
+  #   b.add(tkNewline)
+  #   check b.complete() == false
   
   test "term term":
     b.add(tkString, "foo")
     b.add(tkString, "bar")
+    b.finish()
     check b.root.kind == OConcat
     check $b.root == "\"foo\" \"bar\""
     check b.complete()
@@ -45,6 +45,7 @@ suite "treebuilder":
   test "term rule":
     b.add(tkString, "foo")
     b.add(tkIdentifier, "hey")
+    b.finish()
     check b.root.kind == OConcat
     check $b.root == "\"foo\" hey"
     check b.complete()
@@ -53,6 +54,7 @@ suite "treebuilder":
     b.add(tkString, "foo")
     b.add(tkString, "bar")
     b.add(tkPlus)
+    b.finish()
     check b.root.kind == OConcat
     check $b.root == "\"foo\" \"bar\"+"
     check b.root.children.len == 2
@@ -63,19 +65,21 @@ suite "treebuilder":
   test "rule *":
     b.add(tkIdentifier, "rule")
     b.add(tkStar)
+    b.finish()
     check b.root.kind == ORepetition
     check b.root.repetition_kind == OZeroOrMore
-    check b.root.children[0].kind == ORule
-    check b.root.children[0].rule == "rule"
+    check b.root.children[0].kind == OIdentifier
+    check b.root.children[0].identifier == "rule"
     check $b.root == "rule*"
   
   test "term ?":
     b.add(tkString, "foo")
     b.add(tkQuestion)
+    b.finish()
     check b.root.kind == ORepetition
     check b.root.repetition_kind == OZeroOrOne
-    check b.root.children[0].kind == OTerminal
-    check b.root.children[0].val == "foo"
+    check b.root.children[0].kind == OTerm
+    check b.root.children[0].term == "foo"
     check $b.root == "\"foo\"?"
   
   test "(term term)+":
@@ -88,22 +92,34 @@ suite "treebuilder":
     b.add(tkParenClose)
     check b.complete()
     b.add(tkPlus)
+    b.finish()
     check b.complete()
     check b.root.kind == ORepetition
     check b.root.repetition_kind == OOneOrMore
     check $b.root == "(\"a\" \"b\")+"
     check b.root.children[0].kind == OConcat
   
+  test "rule rule rule rule":
+    b.add(tkIdentifier, "a")
+    b.add(tkIdentifier, "a")
+    b.add(tkIdentifier, "a")
+    b.add(tkIdentifier, "a")
+    b.finish()
+    check b.complete()
+    check b.root.kind == OConcat
+    check b.root.children.len == 4
+
   test "rule rule | rule":
     b.add(tkIdentifier, "a")
     b.add(tkIdentifier, "b")
     b.add(tkPipe)
     b.add(tkIdentifier, "c")
+    b.finish()
     check b.complete
     check b.root.kind == OAlternation
     check b.root.children[0].kind == OConcat
     check b.root.children[0].children.len == 2
-    check b.root.children[1].kind == ORule
+    check b.root.children[1].kind == OIdentifier
     check $b.root == "a b | c"
 
   test "term (rule | term)":
@@ -117,15 +133,16 @@ suite "treebuilder":
     b.add(tkString, "c")
     check b.complete == false
     b.add(tkParenClose)
+    b.finish()
     check b.complete == true
 
     check b.root.kind == OConcat
     check b.root.children.len == 2
-    check b.root.children[0].val == "a"
+    check b.root.children[0].term == "a"
     check b.root.children[1].kind == OAlternation
     check b.root.children[1].children.len == 2
-    check b.root.children[1].children[0].rule == "b"
-    check b.root.children[1].children[1].val == "c"
+    check b.root.children[1].children[0].identifier == "b"
+    check b.root.children[1].children[1].term == "c"
     check $b.root == "\"a\" (b | \"c\")"
   
   test "term | term":
@@ -134,20 +151,24 @@ suite "treebuilder":
     b.add(tkPipe)
     check b.complete() == false
     b.add(tkString, "b")
+    b.finish()
+
     check b.complete()
     check b.root.kind == OAlternation
     check $b.root == "\"a\" | \"b\""
     check b.root.children.len == 2
-    check b.root.children[0].kind == OTerminal
-    check b.root.children[1].kind == OTerminal
+    check b.root.children[0].kind == OTerm
+    check b.root.children[1].kind == OTerm
 
   test "| rule":
     b.add(tkPipe)
     check b.complete() == false
     b.add(tkIdentifier, "hello")
+    b.finish()
+
     check b.complete()
-    check b.root.kind == ORule
-    check b.root.rule == "hello"
+    check b.root.kind == OIdentifier
+    check b.root.identifier == "hello"
     check $b.root == "hello"
   
   test "rule -- foo | rule -- bar":
@@ -158,6 +179,10 @@ suite "treebuilder":
     b.add(tkIdentifier, "b")
     b.add(tkDoubleHyphen)
     b.add(tkIdentifier, "bar")
+    b.finish()
+
+    check b.complete()
+    check $b.root == "a -- foo | b -- bar"
 
 
 
@@ -203,3 +228,50 @@ suite "treebuilder":
 #   # check grammar.match("rofl").ok()
 #   # check grammar.match("loooool").ok()
 #   # check grammar.match("foo").ok() == false
+
+test "eventual":
+  const grammar = """
+// JSON
+// Based on https://github.com/antlr/grammars-v4/blob/master/json/JSON.g4
+JSON {
+  json = value
+
+  value =
+    | string
+    | number
+    | object
+    | array
+    | "true"
+    | "false"
+    | "null"
+  
+  ws =
+    [ \t\n\r]+
+  
+  // Strings
+  string = "\"" (esc | safecodepoint)* "\""
+  esc = "\\" ( ["\\/bfnrt] | unicode )
+  unicode = "u" hex hex hex hex
+  hex = "0".."9" | "a".."f" | "A".."F"
+  safecodepoint = ~ ("\"" | "\u0000".."\u001f" )
+
+  // Numbers
+  number = "-"? int ("." "0".."9" +)? exponent?
+  int =
+    | "0"
+    | "1..9" "0".."9"*
+  exponent =
+    [eE] [+-]? int
+  
+  // Objects
+  object ws:skip =
+    | "{" pair ("," pair)* "}"
+    | "{" "}"
+  pair = string ":" value
+
+  // Arrays
+  array ws:skip =
+    | "[" value ("," value)* "]"
+    | "[" "]"
+}
+"""

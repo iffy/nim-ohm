@@ -29,6 +29,7 @@ type
     tkColon,        ## ':'
     tkDoubleHyphen, ## "--"
     tkNewline,      ## '\n'
+    tkConcat,       ## concat operator
   
   OError* = enum
     errEOC_Expected,  ## ``*/`` expected
@@ -37,7 +38,6 @@ type
   Token = object
     kind: TokKind     # the type of the token
     literal: string   # the parsed (string) literal
-    err: OError     # error, if any
   
   OLexer* = object of BaseLexer
     val*: string
@@ -70,7 +70,8 @@ const
     "#",
     ":",
     "--",
-    "newline"
+    "newline",
+    "concat"
   ]
 
   # https://github.com/harc/ohm/blob/master/doc/syntax-reference.md#built-in-rules
@@ -304,10 +305,15 @@ proc initLexer*(s:string): OLexer =
   result = OLexer()
   result.open(stream)
 
-iterator tokens*(my: var OLexer): (TokKind, string) =
+proc newToken(kind:TokKind, literal:string = "") : Token =
+  result = Token()
+  result.kind = kind
+  result.literal = literal
+
+iterator tokens*(my: var OLexer): Token =
   while my.tok != tkEOF:
     discard my.getTok()
-    yield (my.tok, my.val)
+    yield newToken(my.tok, my.val)
     if my.tok == tkError:
       break
 
@@ -318,131 +324,110 @@ iterator tokens*(my: var OLexer): (TokKind, string) =
 type
   OGrammar* = object
     name*: string
-    rules*: seq[ORuleDef]
+    tree*: OGrammarNode
   
-  ORuleDef* = object
-    name*: string
-    description*: string
-    expression*: OExprBuilder
-  
-  OExprBuilder* = object
-    stack*: OExprNode
-    cursor*: OExprNode
-    incomplete*: int
-
-  OBuilderState* = enum
-    stateInit,
-    stateMaybeMore,
-
-  OExprKind* = enum
-    OTerminal,
-    ORule,
-    OEmpty,
+  OGrammarNodeKind* = enum
+    OGrammarKind,
+    ORuleDef,
+    # Expression nodes
+    OTerm,
+    OIdentifier,
     ORepetition,
-    ONamedExpr,
-    OGenericGroup,
-    OAlternation,
+    ONamedNode,
     OConcat,
+    OAlternation,
+
+  OGrammarNode* = ref OGrammarNodeObj
+  OGrammarNodeObj* {.acyclic.} = object
+    parent*: OGrammarNode
+    children*: seq[OGrammarNode]
+    case kind*: OGrammarNodeKind
+    of OGrammarKind:
+      grammar_name*: string
+    of ORuleDef:
+      rule_name*: string
+    of ORepetition:
+      repetition_kind*: ORepetitionKind
+    of OTerm:
+      term*: string
+    of ONamedNode, OIdentifier:
+      identifier*: string
+    else:
+      discard
+
+  OTreeBuilder* = object of RootObj
+    resultstack*: seq[OGrammarNode]
+    operatorstack*: seq[Token]
+  
+  OExprBuilder* = object of OTreeBuilder
+    lasttoken: TokKind
   
   ORepetitionKind* = enum
     OZeroOrMore,
     OOneOrMore,
     OZeroOrOne,
 
-  OExprNode* = ref OExprNodeObj
-  OExprNodeObj* {.acyclic.} = object
-    parent*: OExprNode
-    children*: seq[OExprNode]
-    case kind*: OExprKind
-    of OTerminal:
-      val*: string
-    of ORule:
-      rule*: string
-    of ORepetition:
-      repetition_kind*: ORepetitionKind
-    of ONamedExpr:
-      name*: string
-    of OEmpty, OGenericGroup, OAlternation, OConcat:
-      discard
-  
-  ParserState = enum
-    stateBetweenGrammars,
-    stateEOF,
-    stateHasGrammarName,
-    stateExpectRule,
-    stateHasRuleName,
-    stateInDescription,
-    stateExpectExpr,
-    stateExpectRuleOrExpr,
+# proc throwup(kind:TokKind, val:string) =
+#   raise newException(CatchableError, &"Unexpected token: {kind} {val.repr}")
 
-  Match* = object
+# proc newEmpty(): OGrammarNode =
+#   new(result)
+#   result.kind = OEmpty
 
-proc throwup(kind:TokKind, val:string) =
-  raise newException(CatchableError, &"Unexpected token: {kind} {val.repr}")
+# proc newGenericGroup(children: seq[OGrammarNode] = @[]): OGrammarNode =
+#   new(result)
+#   result.kind = OGenericGroup
+#   result.children = children
 
-proc newEmpty(): OExprNode =
-  new(result)
-  result.kind = OEmpty
-
-proc newGenericGroup(children: seq[OExprNode] = @[]): OExprNode =
-  new(result)
-  result.kind = OGenericGroup
-  result.children = children
-
-proc newConcat(children: seq[OExprNode] = @[]): OExprNode =
+proc newConcat(children: seq[OGrammarNode] = @[]): OGrammarNode =
   new(result)
   result.kind = OConcat
   result.children = children
 
-proc newAlternation(children: seq[OExprNode] = @[]): OExprNode =
+proc newAlternation(children: seq[OGrammarNode] = @[]): OGrammarNode =
   new(result)
   result.kind = OAlternation
   result.children = children
 
-proc newRuleApplication(name: string): OExprNode =
+proc newIdentifier(name: string): OGrammarNode =
   new(result)
-  result.kind = ORule
-  result.rule = name
+  result.kind = OIdentifier
+  result.identifier = name
 
-proc newTerminal*(val: string): OExprNode =
+proc newTerm*(val: string): OGrammarNode =
   new(result)
-  result.kind = OTerminal
-  result.val = val
+  result.kind = OTerm
+  result.term = val
 
-proc newRepetition(kind: ORepetitionKind, child: OExprNode): OExprNode =
+proc newRepetition(kind: ORepetitionKind, child: OGrammarNode): OGrammarNode =
   new(result)
   result.kind = ORepetition
   result.repetition_kind = kind
   result.children = @[child]
 
+proc newNamedNode(name: string, child: OGrammarNode): OGrammarNode =
+  new(result)
+  result.kind = ONamedNode
+  result.identifier = name
+  result.children = @[child]
+
 proc newExprBuilder*(): OExprBuilder =
-  result = OExprBuilder()
-  result.cursor = newEmpty()
-  result.incomplete = 1
+  result = OExprBuilder(resultstack: @[], operatorstack: @[])
+  result.lasttoken = tkError
 
-proc newRule(name: string): ORuleDef =
-  result = ORuleDef()
-  result.name = name
-  result.expression = newExprBuilder()
-
-proc `$`*(node: OExprNode): string =
+proc `$`*(node: OGrammarNode): string =
   case node.kind
-  of OTerminal:
+  of OTerm:
     # XXX do this right
-    result = &"\"{node.val}\""
-  of OGenericGroup:
-    result.add("(")
-    var joiner = " "
-    for child in node.children:
-      if result.len > 0:
-        result.add(" ")
-      result.add($child)
-    result.add(")")
+    result = &"\"{node.term}\""
   of OConcat:
     for child in node.children:
       if result.len > 0:
         result.add(" ")
-      result.add($child)
+      if child.children.len > 1:
+        result.add(&"({child})")
+      else:
+        result.add(&"{child}")
   of OAlternation:
     for child in node.children:
       if result.len > 0:
@@ -461,167 +446,150 @@ proc `$`*(node: OExprNode): string =
       result = &"({node.children[0]}){suffix}"
     else:
       result = &"{node.children[0]}{suffix}"
-  of OEmpty:
-    result = "<empty>"
-  of ORule:
-    result = node.rule
-  of ONamedExpr:
-    result = &"{node.children[0]} -- {node.name}"
+  of OIdentifier:
+    result = node.identifier
+  of ONamedNode:
+    result = &"{node.children[0]} -- {node.identifier}"
+  else:
+    raise newException(CatchableError, &"Don't know how to display: {node.kind}")
 
-proc `$`*(rule: ORuleDef): string =
-  result = &"{rule.name} = {$rule.expression}"
-
-proc remove*(group: var OExprNode, child: var OExprNode) =
+proc remove*(group: var OGrammarNode, child: var OGrammarNode) =
   let idx = group.children.find(child)
   group.children.delete(idx)
   child.parent = nil
 
-proc add*(group: var OExprNode, child: var OExprNode) =
+proc add*(group: var OGrammarNode, child: var OGrammarNode) =
   if child.parent != nil:
     child.parent.remove(child)
   group.children.add(child)
   child.parent = group
 
-proc replace(oldchild: var OExprNode, newchild: var OExprNode) =
-  if oldchild.parent == nil:
-    discard
-  else:
-    var parent = oldchild.parent
-    parent.remove(oldchild)
-    parent.add(newchild)
-
 #--------------------------------------------------
 # Expression Builder
 #--------------------------------------------------
 
-proc newNode(kind: TokKind, val: string): OExprNode =
-  result = OExprNode()
+proc newNode(kind: TokKind, val: string): OGrammarNode =
+  result = OGrammarNode()
   case kind:
   of tkString:
-    result.kind = OTerminal
-    result.val = val
-  of tkIdentifier:
-    result.kind = ORule
-    result.rule = val
+    result.kind = OTerm
+    result.term = val
   else:
     raise newException(CatchableError, &"Unknown node type: {kind}")
 
-proc printTree*(node: OExprNode): string;
-proc root*(ex: OExprBuilder): OExprNode;
+proc printTree*(node: OGrammarNode): string;
+
+proc root*(ex: OTreeBuilder): OGrammarNode =
+  if ex.resultstack.len > 0:
+    return ex.resultstack[0]
+  else:
+    return nil
+
+proc `$`*(ex: OTreeBuilder): string =
+  result = &"Tree: {ex.root}"
+
+proc performOp(b: var OExprBuilder, op: Token) =
+  case op.kind
+  of tkConcat:
+    var argb = b.resultstack.pop()
+    var arga = b.resultstack.pop()
+    if arga.kind == OConcat:
+      arga.add(argb)
+      b.resultstack.add(arga)
+    elif argb.kind == OConcat:
+      var cc = newConcat()
+      cc.add(arga)
+      while argb.children.len > 0:
+        var child = argb.children[0]
+        argb.remove(child)
+        cc.add(child)
+      b.resultstack.add(cc)
+    else:
+      b.resultstack.add(newConcat(@[arga, argb]))
+  of tkPipe:
+    let argb = b.resultstack.pop()
+    let arga = b.resultstack.pop()
+    b.resultstack.add(newAlternation(@[arga, argb]))
+  of tkPlus:
+    b.resultstack.add(newRepetition(OOneOrMore, b.resultstack.pop()))
+  of tkStar:
+    b.resultstack.add(newRepetition(OZeroOrMore, b.resultstack.pop()))
+  of tkQuestion:
+    b.resultstack.add(newRepetition(OZeroOrOne, b.resultstack.pop()))
+  of tkDoubleHyphen:
+    let name = b.resultstack.pop()
+    let child = b.resultstack.pop()
+    b.resultstack.add(newNamedNode(name.identifier, child))
+  else:
+    raise newException(CatchableError, &"TODO helicopter {op.kind}")
+
+proc popOperatorsUntil*(b: var OExprBuilder, until: set[TokKind]) =
+  while b.operatorstack.len > 0:
+    let top = b.operatorstack[^1]
+    if top.kind in until:
+      break
+    else:
+      b.performOp(b.operatorstack.pop())
+
+proc popOperatorsWhileTopIs*(b: var OExprBuilder, theset: set[TokKind]) =
+  while b.operatorstack.len > 0:
+    let top = b.operatorstack[^1]
+    if top.kind in theset:
+      b.performOp(b.operatorstack.pop())
+    else:
+      break
+
+const tokensThatMakeConcatVals = {tkIdentifier, tkString}
+
+proc add*(b: var OExprBuilder, token: Token) =
+  # https://en.wikipedia.org/wiki/Shunting-yard_algorithm
+  case token.kind
+  of tkIdentifier:
+    if b.lasttoken != tkError and b.lasttoken in tokensThatMakeConcatVals:
+      b.add(newToken(tkConcat))
+    b.resultstack.add(newIdentifier(token.literal))
+  of tkString:
+    if b.lasttoken != tkError and b.lasttoken in tokensThatMakeConcatVals:
+      b.add(newToken(tkConcat))
+    b.resultstack.add(newTerm(token.literal))
+  of tkConcat:
+    b.operatorstack.add(token)
+  of tkParenOpen:
+    if b.lasttoken != tkError and b.lasttoken in tokensThatMakeConcatVals:
+      b.add(newToken(tkConcat))
+    b.operatorstack.add(token)
+  of tkParenClose:
+    b.popOperatorsUntil({tkParenOpen})
+    discard b.operatorstack.pop()
+  of tkPipe:
+    b.popOperatorsWhileTopIs({tkConcat, tkDoubleHyphen})
+    if b.resultstack.len > 0:
+      b.operatorstack.add(token)
+  of tkPlus, tkStar, tkQuestion:
+    b.performOp(token)
+  of tkDoubleHyphen:
+    b.popOperatorsUntil({tkPipe})
+    b.operatorstack.add(token)
+  else:
+    raise newException(CatchableError, &"TODO giraffe {token.kind}")
+  b.lasttoken = token.kind
 
 proc add*(builder: var OExprBuilder, kind: TokKind, val: string = "") =
-  var a = builder.cursor
-  echo ""
-  echo "ADDING ", "+ ", kind, " ", val
-  echo printTree(builder.root)
-  echo "cursor -> ", a
-  case a.kind
-  of OEmpty:
-    # empty + ...
-    case kind
-    of tkString, tkIdentifier:
-      # ... terminal | rule
-      builder.cursor = newNode(kind, val)
-      a.replace(builder.cursor)
-      dec(builder.incomplete) # for removed empty
-    of tkParenOpen:
-      # ... (
-      builder.cursor = newEmpty()
-      inc(builder.incomplete) # for the new empty
-      var group = newConcat()
-      group.add(builder.cursor)
-      a.replace(group)
-      dec(builder.incomplete) # for removed empty
-      inc(builder.incomplete) # for the (
-    of tkPipe, tkNewline:
-      # ... pipe | \L
-      discard
-    else:
-      raise newException(CatchableError, &"TODO 0 {kind}")
-  of OTerminal, ORule, OAlternation, OConcat, OGenericGroup:
-    # (terminal | rule) + ...
-    case kind
-    of tkString, tkIdentifier:
-      # ... terminal | rule
-      builder.cursor = newNode(kind, val)
-      if a.parent == nil:
-        var group = newConcat()
-        group.add(a)
-        group.add(builder.cursor)
-      else:
-        # has a parent already
-        case a.parent.kind
-        of OConcat:
-          a.parent.add(builder.cursor)
-        else:
-          raise newException(CatchableError, &"TODO 2 {a.parent.kind}")
-    of tkPlus, tkStar, tkQuestion:
-      # ... + | * | ?
-      case kind
-      of tkPlus:
-        builder.cursor = newRepetition(OOneOrMore, a)
-      of tkStar:
-        builder.cursor = newRepetition(OZeroOrMore, a)
-      of tkQuestion:
-        builder.cursor = newRepetition(OZeroOrOne, a)
-      else:
-        discard
-      a.replace(builder.cursor)
-    of tkParenClose:
-      # ... )
-      builder.cursor = builder.cursor.parent 
-      dec(builder.incomplete) # for )
-    of tkParenOpen:
-      # ... (
-      builder.cursor = newEmpty()
-      inc(builder.incomplete) # for the new empty
-      var group = newConcat()
-      group.add(a)
-      group.add(builder.cursor)
-      inc(builder.incomplete) # for the (
-    of tkPipe:
-      # ... |
-      builder.cursor = newEmpty()
-      inc(builder.incomplete) # for the new empty
+  add(builder, newToken(kind, val))
 
-      if a.parent == nil:
-        var group = newAlternation()
-        group.add(a)
-        group.add(builder.cursor)
-      else:
-        case a.parent.kind
-        of OConcat:
-          var group = newAlternation()
-          group.add(a.parent)
-          group.add(builder.cursor)
-        else:
-          raise newException(CatchableError, &"TODO B {a.parent.kind}")
-    else:
-      raise newException(CatchableError, &"TODO 5 {kind}")
-  else:
-    raise newException(CatchableError, &"TODO 6 {a.kind}")
-  # echo "builder.cursor: ", builder.cursor
-  echo "newtree"
-  echo printTree(builder.root)
+proc finish*(builder: var OExprBuilder) =
+  builder.popOperatorsUntil({})
 
-proc root*(ex: OExprBuilder): OExprNode =
-  if ex.cursor == nil:
-    result = nil
-  else:
-    result = ex.cursor
-    while result.parent != nil:
-      result = result.parent
-
-proc nodes*(node: OExprNode, level: int = 0): seq[(int, OExprNode)] =
+proc nodes*(node: OGrammarNode, level: int = 0): seq[(int, OGrammarNode)] =
   result.add((level, node))
   for child in node.children:
     for subchild in child.nodes(level + 1):
       result.add(subchild)
 
-proc complete*(builder: OExprBuilder): bool =
-  result = builder.incomplete == 0
+proc complete*(builder: OTreeBuilder): bool =
+  result = (builder.resultstack.len == 1 and builder.operatorstack.len == 0)
 
-proc printTree*(node: OExprNode): string =
+proc printTree*(node: OGrammarNode): string =
   for x in node.nodes():
     result.add("..".repeat(x[0]))
     result.add($x[1].kind)
@@ -629,12 +597,11 @@ proc printTree*(node: OExprNode): string =
     result.add($x[1])
     result.add("\L")
 
-proc `$`*(ex: OExprBuilder): string =
-  result = $(ex.root)
-# proc alternate(obj: var OExprNode) : OExprNode =
+
+# proc alternate(obj: var OGrammarNode) : OGrammarNode =
 #   case obj.kind
 #   of OAlternation
-# proc add(obj: var OExprNode, operator: TokKind) : OExprNode =
+# proc add(obj: var OGrammarNode, operator: TokKind) : OGrammarNode =
 #   result = obj
 #   case operator:
 #   of tkPipe:
@@ -648,7 +615,7 @@ proc `$`*(ex: OExprBuilder): string =
 #   else:
 #     raise newException(CatchableError, &"Can't add type: {operator}")
 
-# proc add(obj: var OExprNode, thing: OExprNode) : OExprNode =
+# proc add(obj: var OGrammarNode, thing: OGrammarNode) : OGrammarNode =
 #   result = obj
 #   case obj.kind
 #   of OAlternation:
@@ -659,72 +626,72 @@ proc `$`*(ex: OExprBuilder): string =
 #   else:
 #       raise newException(CatchableError, &"Node does not support multiple children: {obj.repr} while attempting to add {thing.repr}")
 
-proc parseGrammar*(s:string): OGrammar =
-  var lexer = initLexer(s)
-  result = OGrammar()
-  var rule: ORuleDef
-  var state: seq[ParserState] = @[stateBetweenGrammars]
-  var i = state.len-1
+# proc parseGrammar*(s:string): OGrammar =
+#   var lexer = initLexer(s)
+#   result = OGrammar()
+#   var rule: ORuleDef
+#   var state: seq[ParserState] = @[stateBetweenGrammars]
+#   var i = state.len-1
   
-  for kind, val in lexer.tokens:
-    echo state[i], " ", kind, ": ", val
-    if rule.name != "":
-      echo "rule: ", rule
-    case state[i]
-    of stateBetweenGrammars:
-      case kind
-      of tkIdentifier:
-        state[i] = stateHasGrammarName
-        result.name = val
-      of tkNewline:
-        discard
-      else:
-        throwup(kind, val)
-    of stateHasGrammarName:
-      case kind
-      of tkCurlyOpen:
-        state[i] = stateExpectRule
-      else:
-        throwup(kind, val)
-    of stateExpectRule:
-      case kind
-      of tkNewline:
-        discard
-      of tkIdentifier:
-        state[i] = stateHasRuleName
-        rule = newRule(val)
-        result.rules.add(rule)
-      else:
-        throwup(kind, val)
-    of stateHasRuleName:
-      case kind
-      of tkNewline:
-        discard
-      of tkEqual:
-        state[i] = stateExpectExpr
-      of tkParenOpen:
-        state[i] = stateInDescription
-      else:
-        throwup(kind, val)
-    of stateInDescription:
-      case kind
-      of tkParenClose:
-        state[i] = stateHasRuleName
-      else:
-        if rule.description.len > 0:
-          rule.description.add(" ")
-        rule.description.add(val)
-    of stateExpectExpr, stateExpectRuleOrExpr:
-      rule.expression.add(kind, val)
-      if rule.expression.complete():
-        state[i] = stateExpectRuleOrExpr
-      else:
-        state[i] = stateExpectExpr
-    of stateEOF:
-      if kind == tkEOF:
-        discard
-      else:
-        raise newException(CatchableError, "EOF Error")
+#   for kind, val in lexer.tokens:
+#     echo state[i], " ", kind, ": ", val
+#     if rule.name != "":
+#       echo "rule: ", rule
+#     case state[i]
+#     of stateBetweenGrammars:
+#       case kind
+#       of tkIdentifier:
+#         state[i] = stateHasGrammarName
+#         result.name = val
+#       of tkNewline:
+#         discard
+#       else:
+#         throwup(kind, val)
+#     of stateHasGrammarName:
+#       case kind
+#       of tkCurlyOpen:
+#         state[i] = stateExpectRule
+#       else:
+#         throwup(kind, val)
+#     of stateExpectRule:
+#       case kind
+#       of tkNewline:
+#         discard
+#       of tkIdentifier:
+#         state[i] = stateHasRuleName
+#         rule = newRule(val)
+#         result.rules.add(rule)
+#       else:
+#         throwup(kind, val)
+#     of stateHasRuleName:
+#       case kind
+#       of tkNewline:
+#         discard
+#       of tkEqual:
+#         state[i] = stateExpectExpr
+#       of tkParenOpen:
+#         state[i] = stateInDescription
+#       else:
+#         throwup(kind, val)
+#     of stateInDescription:
+#       case kind
+#       of tkParenClose:
+#         state[i] = stateHasRuleName
+#       else:
+#         if rule.description.len > 0:
+#           rule.description.add(" ")
+#         rule.description.add(val)
+#     of stateExpectExpr, stateExpectRuleOrExpr:
+#       rule.expression.add(kind, val)
+#       if rule.expression.complete():
+#         state[i] = stateExpectRuleOrExpr
+#       else:
+#         state[i] = stateExpectExpr
+#     of stateEOF:
+#       if kind == tkEOF:
+#         discard
+#       else:
+#         raise newException(CatchableError, "EOF Error")
     
 
 #-------------------------------------------------------------------
